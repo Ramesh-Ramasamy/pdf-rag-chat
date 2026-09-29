@@ -5,7 +5,7 @@
 
 Chat with your PDFs. A small, production-style Retrieval-Augmented Generation (RAG) app built with Streamlit, Gemini embeddings and a free LLM (Groq Llama, with Gemini as fallback). Every answer cites the source file and page.
 
-Interview preparation notes for this project: [INTERVIEW.md](INTERVIEW.md)
+Detailed notes for this project: [INTERVIEW.md](INTERVIEW.md)
 
 ## How it works
 
