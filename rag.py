@@ -104,7 +104,7 @@ def build_prompt(question: str, hits: list[tuple[Chunk, float]]) -> str:
 
 FALLBACK_MODELS = [
     m.strip()
-    for m in os.getenv("GEMINI_FALLBACK_MODELS", "gemini-3.8-flash-lite,gemini-2.5-flash-lite").split(",")
+    for m in os.getenv("GEMINI_FALLBACK_MODELS", "gemini-3.5-flash-lite").split(",")
     if m.strip()
 ]
 
@@ -114,30 +114,76 @@ def _is_transient(err: Exception) -> bool:
     return any(t in msg for t in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", "INTERNAL"))
 
 
-def answer_stream(api_key: str, question: str, hits: list[tuple[Chunk, float]]):
-    """Stream an answer; retry transient errors with backoff, then try fallback models."""
+def discover_models(client) -> list[str]:
+    """Ask the API which text models this key can use (names go stale, so don't hardcode only)."""
+    found: list[str] = []
+    try:
+        for m in client.models.list():
+            name = (m.name or "").removeprefix("models/")
+            actions = getattr(m, "supported_actions", None) or []
+            if "gemini" in name and "generateContent" in actions and not any(
+                x in name for x in ("embedding", "image", "tts", "live", "audio", "vision", "robotics")
+            ):
+                found.append(name)
+    except Exception:  # noqa: BLE001
+        return []
+    # flash models first, newest (highest name) first
+    return sorted(found, key=lambda n: ("flash" in n, n), reverse=True)
+
+
+def _stream_with_retry(client, model: str, prompt: str):
+    """Yield text chunks. Retries transient errors; raises last error if it never starts."""
     import time
 
+    last: Exception | None = None
+    for attempt in range(3):
+        started = False
+        try:
+            for part in client.models.generate_content_stream(model=model, contents=prompt):
+                if part.text:
+                    started = True
+                    yield part.text
+            return
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if started:  # never restart a half-streamed answer
+                raise
+            if not _is_transient(e):
+                raise
+            time.sleep(2**attempt)  # 1s, 2s, 4s
+    raise last  # type: ignore[misc]
+
+
+def answer_stream(api_key: str, question: str, hits: list[tuple[Chunk, float]]):
+    """Stream an answer. Try configured models, then models discovered from the API."""
     from google import genai
 
     client = genai.Client(api_key=api_key)
     prompt = build_prompt(question, hits)
-    last_err: Exception | None = None
-    for model in [CHAT_MODEL, *FALLBACK_MODELS]:
-        for attempt in range(3):
+    tried: list[str] = []
+    first_err: Exception | None = None
+
+    def attempt(models):
+        nonlocal first_err
+        for model in models:
+            if model in tried:
+                continue
+            tried.append(model)
             started = False
             try:
-                for part in client.models.generate_content_stream(model=model, contents=prompt):
-                    if part.text:
-                        started = True
-                        yield part.text
-                return
+                for text in _stream_with_retry(client, model, prompt):
+                    started = True
+                    yield text
+                return True
             except Exception as e:  # noqa: BLE001
-                last_err = e
-                if started:  # do not restart a half-streamed answer
+                if started:
                     raise
-                if _is_transient(e):
-                    time.sleep(2**attempt)  # 1s, 2s, 4s
-                    continue
-                break  # e.g. 404 model not found: go to next model
-    raise last_err if last_err else RuntimeError("No model available")
+                first_err = first_err or e
+        return False
+
+    for configured in ([CHAT_MODEL, *FALLBACK_MODELS], None):
+        models = configured if configured is not None else discover_models(client)[:4]
+        ok = yield from attempt(models)
+        if ok:
+            return
+    raise first_err or RuntimeError("No Gemini model available for this API key")
