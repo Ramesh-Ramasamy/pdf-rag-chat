@@ -10,7 +10,7 @@ import numpy as np
 from pypdf import PdfReader
 
 EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "gemini-embedding-001")
-CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-2.5-flash")
+CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-3.8-flash")
 
 Embedder = Callable[[Sequence[str], str], np.ndarray]
 
