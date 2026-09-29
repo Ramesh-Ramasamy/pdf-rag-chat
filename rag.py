@@ -102,12 +102,42 @@ def build_prompt(question: str, hits: list[tuple[Chunk, float]]) -> str:
     )
 
 
+FALLBACK_MODELS = [
+    m.strip()
+    for m in os.getenv("GEMINI_FALLBACK_MODELS", "gemini-3.8-flash-lite,gemini-2.5-flash-lite").split(",")
+    if m.strip()
+]
+
+
+def _is_transient(err: Exception) -> bool:
+    msg = str(err)
+    return any(t in msg for t in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", "INTERNAL"))
+
+
 def answer_stream(api_key: str, question: str, hits: list[tuple[Chunk, float]]):
+    """Stream an answer; retry transient errors with backoff, then try fallback models."""
+    import time
+
     from google import genai
 
     client = genai.Client(api_key=api_key)
-    for part in client.models.generate_content_stream(
-        model=CHAT_MODEL, contents=build_prompt(question, hits)
-    ):
-        if part.text:
-            yield part.text
+    prompt = build_prompt(question, hits)
+    last_err: Exception | None = None
+    for model in [CHAT_MODEL, *FALLBACK_MODELS]:
+        for attempt in range(3):
+            started = False
+            try:
+                for part in client.models.generate_content_stream(model=model, contents=prompt):
+                    if part.text:
+                        started = True
+                        yield part.text
+                return
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if started:  # do not restart a half-streamed answer
+                    raise
+                if _is_transient(e):
+                    time.sleep(2**attempt)  # 1s, 2s, 4s
+                    continue
+                break  # e.g. 404 model not found: go to next model
+    raise last_err if last_err else RuntimeError("No model available")
