@@ -2,6 +2,7 @@ import os
 
 import streamlit as st
 
+import rag
 from rag import VectorIndex, answer_stream, build_chunks, gemini_embedder
 
 st.set_page_config(page_title="PDF RAG Chat", page_icon="📄", layout="wide")
@@ -18,6 +19,16 @@ def get_key() -> str | None:
     return os.getenv("GEMINI_API_KEY")
 
 
+def get_secret(name: str) -> str | None:
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    return os.getenv(name)
+
+
+groq_key = get_secret("GROQ_API_KEY")
 api_key = get_key() or st.sidebar.text_input("Gemini API key", type="password")
 if not api_key:
     st.info("Add GEMINI_API_KEY in app secrets, or paste a key in the sidebar (free at aistudio.google.com).")
@@ -42,6 +53,9 @@ with st.sidebar:
                 else:
                     st.warning(f"No extractable text in {f.name} (scanned PDF?)")
     st.write(f"Indexed chunks: **{len(st.session_state.index.chunks)}**")
+    st.caption(
+        f"Build {rag.BUILD} | chat: {'Groq ' + rag.GROQ_MODELS[0] if groq_key else 'Gemini ' + rag.CHAT_MODEL}"
+    )
 
 for m in st.session_state.messages:
     with st.chat_message(m["role"]):
@@ -58,9 +72,9 @@ if q := st.chat_input("Ask a question about your documents"):
             st.markdown(reply)
         else:
             try:
-                reply = st.write_stream(answer_stream(api_key, q, hits))
+                reply = st.write_stream(answer_stream(api_key, q, hits, groq_key))
             except Exception as e:
-                reply = f"Error from the model API: {e}"
+                reply = f"Error from the model API (models tried: {rag.LAST_MODELS_TRIED}): {e}"
                 st.error(reply)
             with st.expander("Sources"):
                 for n, (c, s) in enumerate(hits, 1):
